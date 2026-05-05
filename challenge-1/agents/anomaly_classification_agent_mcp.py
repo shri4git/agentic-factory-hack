@@ -12,6 +12,7 @@ load_dotenv(override=True)
 project_endpoint = os.environ.get("AZURE_AI_PROJECT_ENDPOINT")
 project_resource_id = os.environ.get("AZURE_AI_PROJECT_RESOURCE_ID")
 model_name = os.environ.get("MODEL_DEPLOYMENT_NAME")
+connection_api_version = "2025-10-01-preview"
 
 
 # MCP configuration
@@ -38,33 +39,36 @@ def create_apim_mcp_connection(connection_name, mcp_endpoint):
 
     # Create project connection
     response = requests.put(
-        f"https://management.azure.com{project_resource_id}/connections/{project_connection_name}?api-version=2025-10-01-preview",
+        f"https://management.azure.com{project_resource_id}/connections/{project_connection_name}?api-version={connection_api_version}",
         headers=headers,
         json={
             "name": project_connection_name,
-            "type": "Microsoft.MachineLearningServices/workspaces/connections",
+            "type": "Microsoft.CognitiveServices/accounts/projects/connections",
             "properties": {
                 "authType": "CustomKeys",
                 "category": "RemoteTool",
                 "target": mcp_endpoint,
                 "isSharedToAll": True,
-                "credentials":  {"keys": {"Ocp-Apim-Subscription-Key": os.environ.get("APIM_SUBSCRIPTION_KEY")}},
-                "metadata": {"type": "custom_MCP"}
+                "useWorkspaceManagedIdentity": False,
+                "credentials": {"keys": {"Ocp-Apim-Subscription-Key": apim_subscription_key}},
+                "metadata": {"ApiVersion": connection_api_version}
             }
         }
     )
 
     response.raise_for_status()
+    connection = response.json()
     print(
         f"✅ Connection '{project_connection_name}' created successfully.")
+    return connection.get("id", f"{project_resource_id}/connections/{project_connection_name}")
 
 
 async def main():
     try:
         # Register APIM MCP servers as project connection
-        create_apim_mcp_connection(
+        machine_connection_id = create_apim_mcp_connection(
             connection_name="machine-data-connection", mcp_endpoint=machine_data_mcp_endpoint)
-        create_apim_mcp_connection(
+        maintenance_connection_id = create_apim_mcp_connection(
             connection_name="maintenance-data-connection", mcp_endpoint=maintenance_data_mcp_endpoint)
 
         # Create Agent
@@ -107,13 +111,13 @@ async def main():
                         server_label="machine-data",
                         server_url=machine_data_mcp_endpoint,
                         require_approval="never",
-                        project_connection_id=machine_data_connection_name
+                        project_connection_id=machine_connection_id
                     ),
                     MCPTool(
                         server_label="maintenance-data",
                         server_url=maintenance_data_mcp_endpoint,
                         require_approval="never",
-                        project_connection_id=maintenance_data_connection_name
+                        project_connection_id=maintenance_connection_id
                     )
 
                 ]
@@ -136,7 +140,19 @@ async def main():
             # Ask a question
             response = openai_client.responses.create(
                 conversation=conversation.id,
-                input='Hello, can you classify the following anomalies for machine-001: [{"metric": "curing_temperature", "value": 179.2},{"metric": "cycle_time", "value": 14.5}]',
+                                input="""Classify these anomalies using the available MCP tools.
+
+Input payload:
+{
+    "machineId": "machine-001",
+    "anomalies": [
+        {"metric": "curing_temperature", "value": 179.2},
+        {"metric": "cycle_time", "value": 14.5}
+    ]
+}
+
+First fetch the machine details for the machine id, then fetch thresholds for that machine type, then compare each anomaly against the thresholds and return the requested alert format.
+""",
                 extra_body={"agent_reference": {"name": agent.name,
                                                 "type": "agent_reference"}},
             )
